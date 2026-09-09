@@ -8,9 +8,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bitboards import MAX_MOVES, MAX_PLY  # noqa: E402
-from fen import parse  # noqa: E402
-from perft import perft  # noqa: E402
+from bitboards import MAX_MOVES, MAX_PLY
+from fen import parse
+from perft import perft
 
 CASES = (
     ("startpos", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",

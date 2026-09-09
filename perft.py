@@ -3,11 +3,15 @@
 import numpy as np
 from numba import int8, int32, int64, njit, uint64
 
-from bitboards import KING, lsb
+from bitboards import KING, ST_SIDE, lsb
 from position import generate, is_attacked, make_move, unmake_move
 
+
 @njit(
-    int64(uint64[::1], int8[::1], int64[::1], uint64[::1], int64[:, ::1], int32[:, ::1], int64, int64),
+    int64(
+        uint64[::1], int8[::1], int64[::1], uint64[::1], int64[:, ::1], int32[:, ::1],
+        int64, int64,
+    ),
     cache=False,
 )
 def perft(

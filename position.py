@@ -20,7 +20,7 @@ A move is packed into one int32:
 """
 
 import numpy as np
-from numba import int8, int32, int64, njit, uint64
+from numba import int8, int32, int64, njit, uint64, void
 
 from bitboards import (
     BISHOP,
@@ -34,7 +34,6 @@ from bitboards import (
     KNIGHT,
     KNIGHT_ATTACKS,
     OCC_ALL,
-    OCC_B,
     OCC_W,
     PAWN,
     PAWN_ATTACKS,
@@ -83,22 +82,22 @@ def encode(origin: int, target: int, promotion: int, special: int) -> np.int32:
 
 @njit(int64(int32), inline="always", cache=False)
 def move_from(move: np.int32) -> int:
-    return np.int64(move) & 63
+    return int(np.int64(move) & 63)
 
 
 @njit(int64(int32), inline="always", cache=False)
 def move_to(move: np.int32) -> int:
-    return (np.int64(move) >> 6) & 63
+    return int((np.int64(move) >> 6) & 63)
 
 
 @njit(int64(int32), inline="always", cache=False)
 def move_promotion(move: np.int32) -> int:
-    return (np.int64(move) >> 12) & 7
+    return int((np.int64(move) >> 12) & 7)
 
 
 @njit(int64(int32), inline="always", cache=False)
 def move_special(move: np.int32) -> int:
-    return (np.int64(move) >> 15) & 3
+    return int((np.int64(move) >> 15) & 3)
 
 
 @njit(uint64(uint64[::1], int64, int64, uint64), cache=False)
@@ -129,10 +128,10 @@ def in_check(bb: np.ndarray, st: np.ndarray) -> int:
     king = bb[side * 6 + KING]
     if king == ZERO:
         return 0
-    return is_attacked(bb, lsb(king), 1 - side)
+    return int(is_attacked(bb, lsb(king), 1 - side))
 
 
-@njit(cache=False)
+@njit(int64(uint64[::1], int64[::1], int32[::1], int64), cache=False)
 def generate(bb: np.ndarray, st: np.ndarray, moves: np.ndarray, captures_only: int) -> int:
     """Pseudo-legal moves into `moves`, returning how many. Legality is checked after make_move.
 
@@ -376,7 +375,10 @@ def _take(bb: np.ndarray, mb: np.ndarray, key: np.ndarray, piece: int, square: i
     key[0] ^= ZOBRIST_PIECE[piece, square]
 
 
-@njit(cache=False)
+@njit(
+    void(uint64[::1], int8[::1], int64[::1], uint64[::1], int64[:, ::1], int64, int32),
+    cache=False,
+)
 def make_move(
     bb: np.ndarray,
     mb: np.ndarray,
@@ -450,7 +452,10 @@ def make_move(
     key[0] ^= ZOBRIST_SIDE
 
 
-@njit(cache=False)
+@njit(
+    void(uint64[::1], int8[::1], int64[::1], uint64[::1], int64[:, ::1], int64, int32),
+    cache=False,
+)
 def unmake_move(
     bb: np.ndarray,
     mb: np.ndarray,
@@ -509,7 +514,7 @@ def unmake_move(
         key[0] ^= ZOBRIST_EP[st[ST_EP] & 7]
 
 
-@njit(cache=False)
+@njit(void(int64[::1], uint64[::1], int64[:, ::1], int64), cache=False)
 def make_null(st: np.ndarray, key: np.ndarray, undo: np.ndarray, ply: int) -> None:
     undo[ply, 0] = EMPTY
     undo[ply, 1] = st[ST_CASTLE]
@@ -523,7 +528,7 @@ def make_null(st: np.ndarray, key: np.ndarray, undo: np.ndarray, ply: int) -> No
     key[0] ^= ZOBRIST_SIDE
 
 
-@njit(cache=False)
+@njit(void(int64[::1], uint64[::1], int64[:, ::1], int64), cache=False)
 def unmake_null(st: np.ndarray, key: np.ndarray, undo: np.ndarray, ply: int) -> None:
     st[ST_SIDE] = 1 - st[ST_SIDE]
     key[0] ^= ZOBRIST_SIDE

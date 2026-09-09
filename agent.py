@@ -19,7 +19,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
-import time  # noqa: E402
+import time
 
 _IMPORT_STARTED = time.perf_counter()
 
@@ -36,6 +36,11 @@ INCREMENT_MS = 500
 # Moves the budget assumes are still to come. Games here start from curated middlegames and can
 # run to 300 moves a side, so this is deliberately generous rather than tuned to a short game.
 EXPECTED_MOVES = 28
+# Held back from the budget entirely. Without it the per-move spend converges on slightly more
+# than the increment, so a long game bleeds the clock toward zero: a real 70-move game finished
+# with 2.8 seconds left. Reserving this makes the steady-state spend land just under the
+# increment instead, so a long game slowly refills the clock rather than draining it.
+RESERVE_MS = 6000
 # Held back for the FEN parse, the JSON round trip and the referee's own measurement.
 OVERHEAD_MS = 55
 # Never spend more than this share of the clock on one move, whatever the budget says.
@@ -50,15 +55,21 @@ _mb = np.zeros(64, dtype=np.int8)
 _st = np.zeros(4, dtype=np.int64)
 _key = np.zeros(1, dtype=np.uint64)
 _undo = np.zeros((MAX_PLY + 8, 4), dtype=np.int64)
-_moves = np.zeros((MAX_PLY + 8, MAX_MOVES), dtype=np.int32)
-_scores = np.zeros((MAX_PLY + 8, MAX_MOVES), dtype=np.int32)
+_moves = np.zeros((2 * (MAX_PLY + 8), MAX_MOVES), dtype=np.int32)
+_scores = np.zeros((2 * (MAX_PLY + 8), MAX_MOVES), dtype=np.int32)
 _tt_key = np.zeros(TT_SIZE, dtype=np.uint64)
 _tt_val = np.zeros(TT_SIZE, dtype=np.uint64)
 _killers = np.zeros((MAX_PLY + 8, 2), dtype=np.int32)
 _history = np.zeros((2, 64, 64), dtype=np.int32)
 _counters = np.zeros((12, 64), dtype=np.int32)
+# Continuation history: how a move has done as a reply to each of the last two moves.
+_conthist = np.zeros((2, 768, 768), dtype=np.int32)
+_stack = np.zeros(MAX_PLY + 8, dtype=np.int32)
+_evals = np.zeros(MAX_PLY + 8, dtype=np.int32)
 _repetition = np.zeros(MAX_GAME_PLIES + MAX_PLY + 8, dtype=np.uint64)
 _info = np.zeros(16, dtype=np.int64)
+# Attack maps the evaluation fills in, kept here so evaluating costs no allocation.
+_escratch = np.zeros(16, dtype=np.uint64)
 
 # Positions the game has actually passed through, so a search never walks into a repetition
 # that the referee would claim as a draw. Index 0 is the first position we were asked about.
@@ -77,7 +88,10 @@ def _budget(time_left_ms: int) -> tuple[float, float]:
     if available <= 0:
         return 0.0, 0.0
 
-    soft_ms = available / EXPECTED_MOVES + INCREMENT_MS * 0.75
+    usable = float(available - RESERVE_MS)
+    if usable < 0.0:
+        usable = 0.0
+    soft_ms = usable / EXPECTED_MOVES + INCREMENT_MS * 0.70
     hard_ms = soft_ms * 3.0
 
     ceiling = available * MAX_SHARE
@@ -102,7 +116,7 @@ def _first_legal() -> int:
     count = generate(_bb, _st, _moves[0], 0)
     for i in range(count):
         move = _moves[0, i]
-        make_move(_bb, _mb, _st, _key, _undo, 0, move)
+        make_move(_bb, _mb, _st, _key, _undo, 0, np.int32(move))
         legal = not is_attacked(_bb, lsb(_bb[side * 6 + KING]), 1 - side)
         _unmake(move)
         if legal:
@@ -113,7 +127,7 @@ def _first_legal() -> int:
 def _unmake(move: int) -> None:
     from position import unmake_move
 
-    unmake_move(_bb, _mb, _st, _key, _undo, 0, move)
+    unmake_move(_bb, _mb, _st, _key, _undo, 0, np.int32(move))
 
 
 def _only_legal_move() -> int:
@@ -124,7 +138,7 @@ def _only_legal_move() -> int:
     legal_count = 0
     for i in range(count):
         move = _moves[0, i]
-        make_move(_bb, _mb, _st, _key, _undo, 0, move)
+        make_move(_bb, _mb, _st, _key, _undo, 0, np.int32(move))
         legal = not is_attacked(_bb, lsb(_bb[side * 6 + KING]), 1 - side)
         _unmake(move)
         if legal:
@@ -146,6 +160,20 @@ def _record_history(fen_key: np.uint64) -> None:
     _repetition[_game_length] = fen_key
     _info[4] = _game_length
     _game_length += 1
+
+
+def _second_opinion(fen: str) -> str:
+    """A legal move from python-chess, used only if our own generator produced none."""
+    try:
+        import chess
+
+        board = chess.Board(fen)
+        for move in board.legal_moves:
+            print(f"fallback: own movegen found nothing in {fen}", flush=True)
+            return str(move.uci())
+    except Exception as failure:
+        print(f"fallback failed: {failure!r}", flush=True)
+    return "0000"
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
@@ -175,15 +203,19 @@ def get_move(fen: str, time_left_ms: int) -> str:
     move = int(
         search_root(
             _bb, _mb, _st, _key, _undo, _moves, _scores, _tt_key, _tt_val, _killers,
-            _history, _counters, _repetition, _info, soft_deadline, hard_deadline,
+            _history, _counters, _conthist, _stack, _evals, _repetition, _escratch, _info,
+            soft_deadline, hard_deadline,
             MAX_PLY - 16, 1 if VERBOSE else 0,
         )
     )
     if move == int(NO_MOVE):
         move = _first_legal()
         if move == int(NO_MOVE):
-            # No legal move exists. The game is already over; any string loses nothing.
-            return "0000"
+            # Our own move generator says there is nothing to play. Either the game is already
+            # over, in which case anything is fine, or the generator is wrong, in which case a
+            # second opinion is the difference between a bad move and a forfeit. This has never
+            # fired since the en passant parsing bug was fixed, and it costs nothing to keep.
+            return _second_opinion(fen)
 
     elapsed = (time.perf_counter() - started) * 1000.0
     print(
@@ -200,7 +232,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
 def _advance(move: int) -> None:
     """Play our own move on the tracked position so the next call sees an unbroken history."""
     global _game_length
-    make_move(_bb, _mb, _st, _key, _undo, 0, move)
+    make_move(_bb, _mb, _st, _key, _undo, 0, np.int32(move))
     if _game_length < MAX_GAME_PLIES:
         _repetition[_game_length] = _key[0]
         _game_length += 1
@@ -223,7 +255,8 @@ def _warm_up() -> None:
         now = time.perf_counter()
         search_root(
             _bb, _mb, _st, _key, _undo, _moves, _scores, _tt_key, _tt_val, _killers,
-            _history, _counters, _repetition, _info, now + budget, now + budget, 12, 0,
+            _history, _counters, _conthist, _stack, _evals, _repetition, _escratch, _info,
+            now + budget, now + budget, 12, 0,
         )
         # The helpers get_move calls from Python, so their entry points exist before the clock.
         _only_legal_move()
@@ -232,6 +265,7 @@ def _warm_up() -> None:
     _tt_val[:] = 0
     _history[:] = 0
     _counters[:] = 0
+    _conthist[:] = 0
     _killers[:] = 0
     _repetition[:] = 0
 

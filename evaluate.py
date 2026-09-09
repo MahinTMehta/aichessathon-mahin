@@ -17,6 +17,7 @@ from bitboards import (
     FILES,
     FRONT_SPAN,
     KING,
+    KING_ATTACKS,
     KING_ZONE,
     KNIGHT,
     KNIGHT_ATTACKS,
@@ -39,10 +40,11 @@ from bitboards import (
 U64 = np.uint64
 ONE = U64(1)
 ZERO = U64(0)
+DARK_SQUARES = U64(0xAA55AA55AA55AA55)
 
 # Piece values, midgame and endgame. The king is scored only by its table.
-MG_VALUE = (82, 337, 365, 477, 1025, 0)
-EG_VALUE = (94, 281, 297, 512, 936, 0)
+MG_VALUE = (106, 377, 399, 515, 1347, 0)
+EG_VALUE = (94, 277, 293, 520, 724, 0)
 
 # How much of the phase each piece contributes. Pawns contribute nothing, so trading pawns does
 # not push the game toward the endgame weights on its own.
@@ -198,7 +200,7 @@ EG_VALUE_ARRAY = np.array(EG_VALUE, dtype=np.int64)
 # Mobility bonuses indexed by piece type and by how many safe squares the piece reaches. The
 # curves are flat-ish at the top because the twentieth square a queen sees is worth little.
 def _mobility_curve(scale: float, peak: int, size: int) -> list[int]:
-    return [int(round(scale * (min(i, peak) - peak / 2.0))) for i in range(size)]
+    return [round(scale * (min(i, peak) - peak / 2.0)) for i in range(size)]
 
 
 _MOB_MG = np.zeros((6, 32), dtype=np.int64)
@@ -212,19 +214,19 @@ MOBILITY_MG = _MOB_MG
 MOBILITY_EG = _MOB_EG
 
 # Passed pawn bonus by how far the pawn has travelled, from its own side's point of view.
-PASSED_MG = np.array([0, 2, 6, 14, 34, 68, 118, 0], dtype=np.int64)
-PASSED_EG = np.array([0, 12, 22, 42, 78, 134, 208, 0], dtype=np.int64)
+PASSED_MG = np.array([0, 0, -12, 22, 40, 72, 84, 0], dtype=np.int64)
+PASSED_EG = np.array([0, 24, 30, 38, 48, 78, 64, 0], dtype=np.int64)
 
-ISOLATED_MG, ISOLATED_EG = -14, -18
-DOUBLED_MG, DOUBLED_EG = -10, -24
+ISOLATED_MG, ISOLATED_EG = -14, -10
+DOUBLED_MG, DOUBLED_EG = -30, -17
 BACKWARD_MG, BACKWARD_EG = -8, -12
-CONNECTED_MG, CONNECTED_EG = 8, 6
-BISHOP_PAIR_MG, BISHOP_PAIR_EG = 28, 48
-ROOK_OPEN_MG, ROOK_OPEN_EG = 32, 12
-ROOK_SEMI_MG, ROOK_SEMI_EG = 14, 8
-ROOK_SEVENTH_MG, ROOK_SEVENTH_EG = 12, 28
-KNIGHT_OUTPOST_MG, KNIGHT_OUTPOST_EG = 22, 10
-TEMPO = 14
+CONNECTED_MG, CONNECTED_EG = 8, -8
+BISHOP_PAIR_MG, BISHOP_PAIR_EG = 36, 52
+ROOK_OPEN_MG, ROOK_OPEN_EG = 36, -4
+ROOK_SEMI_MG, ROOK_SEMI_EG = 14, 24
+ROOK_SEVENTH_MG, ROOK_SEVENTH_EG = 20, -4
+KNIGHT_OUTPOST_MG, KNIGHT_OUTPOST_EG = 30, -4
+TEMPO = 11
 
 # King safety converts "how much material is aiming at the king zone" into centipawns. The curve
 # is quadratic at the bottom and saturates, which is the usual shape.
@@ -232,10 +234,39 @@ _KING_DANGER = np.zeros(80, dtype=np.int64)
 for _i in range(80):
     _KING_DANGER[_i] = min(int(_i * _i * 0.55), 620)
 KING_DANGER = _KING_DANGER
-ATTACK_WEIGHT = np.array([0, 20, 20, 40, 80, 0], dtype=np.int64)
+ATTACK_WEIGHT = np.array([0, 5, 8, 18, 64, 0], dtype=np.int64)
 
-SHIELD_MISSING_MG = -18
-OPEN_FILE_ON_KING_MG = -24
+PAWN_THREAT_MG, PAWN_THREAT_EG = 53, 11
+MINOR_THREAT_MG, MINOR_THREAT_EG = 64, -4
+ROOK_THREAT_MG, ROOK_THREAT_EG = 33, 20
+HANGING_MG, HANGING_EG = 17, 16
+BAD_BISHOP_MG, BAD_BISHOP_EG = 1, 5
+
+SHIELD_MISSING_MG = -6
+OPEN_FILE_ON_KING_MG = -38
+
+
+@njit(int64(int64, int64), inline="always", cache=False)
+def _king_distance(king: int, square: int) -> int:
+    """Chebyshev distance, which is how many moves a king needs to get there."""
+    file_gap = (king & 7) - (square & 7)
+    rank_gap = (king >> 3) - (square >> 3)
+    if file_gap < 0:
+        file_gap = -file_gap
+    if rank_gap < 0:
+        rank_gap = -rank_gap
+    return file_gap if file_gap > rank_gap else rank_gap
+
+
+@njit(int64(int64, int64), inline="always", cache=False)
+def _divide(value: int, divisor: int) -> int:
+    """Divide truncating toward zero.
+
+    Python's // rounds toward negative infinity, so it turns a position and its mirror into
+    scores one centipawn apart. That is a colour bias, small but real, and it shows up as a
+    failure in the symmetry check.
+    """
+    return value // divisor if value >= 0 else -((-value) // divisor)
 
 
 @njit(int64(uint64[::1], int64), inline="always", cache=False)
@@ -254,13 +285,20 @@ def _scale_drawish(bb: np.ndarray, score: int) -> int:
     if majors == 0 and minors <= 2:
         # Two knights, or a lone minor, cannot force mate against a bare king.
         if minors <= 1 or not bb[base + BISHOP]:
-            return score // 8
-        return score // 2
+            return int(_divide(score, 8))
+        return int(_divide(score, 2))
     return score
 
 
-@njit(int64(uint64[::1], int64[::1]), cache=False)
-def evaluate(bb: np.ndarray, st: np.ndarray) -> int:
+@njit(int64(uint64[::1], int64[::1], uint64[::1]), cache=False)
+def evaluate(bb: np.ndarray, st: np.ndarray, scratch: np.ndarray) -> int:
+    """Score the position in centipawns, from the side to move's point of view.
+
+    Two passes. The first walks the pieces, scoring material, placement, mobility and pawn
+    structure, and records what every piece attacks. The second uses those attack maps for the
+    two terms that need both sides at once: what each side is threatening, and how exposed each
+    king is. `scratch` is a caller-owned buffer so the attack maps cost no allocation.
+    """
     occupancy = bb[OCC_ALL]
     mg = 0
     eg = 0
@@ -282,20 +320,29 @@ def evaluate(bb: np.ndarray, st: np.ndarray) -> int:
     king_squares = (white_king_square, black_king_square)
     king_zones = (KING_ZONE[0, white_king_square], KING_ZONE[1, black_king_square])
 
-    danger = np.zeros(2, dtype=np.int64)
-    attacker_count = np.zeros(2, dtype=np.int64)
+    for i in range(16):
+        scratch[i] = ZERO
 
     for side in range(2):
         sign = 1 if side == WHITE else -1
         base = side * 6
+        slot = side * 8
         own = bb[OCC_W + side]
         friendly_pawns = own_pawns_bb[side]
         enemy_pawns = own_pawns_bb[1 - side]
         enemy_pawn_attacks = pawn_attacks[1 - side]
-        enemy_zone = king_zones[1 - side]
         safe = ~(own | enemy_pawn_attacks)
 
-        for kind in range(6):
+        # Pawn and king attacks seed the maps; the piece loop adds to them.
+        covered = pawn_attacks[side]
+        twice = ZERO
+        scratch[slot + PAWN] = covered
+        king_attack = KING_ATTACKS[king_squares[side]]
+        scratch[slot + KING] = king_attack
+        twice |= covered & king_attack
+        covered |= king_attack
+
+        for kind in range(1, 5):
             pieces = bb[base + kind]
             while pieces:
                 square = lsb(pieces)
@@ -304,12 +351,8 @@ def evaluate(bb: np.ndarray, st: np.ndarray) -> int:
                 mg += sign * MG_TABLE[base + kind, square]
                 eg += sign * EG_TABLE[base + kind, square]
 
-                if kind == PAWN or kind == KING:
-                    continue
-
                 # Bishops and rooks look through their own batteries, so a doubled rook is not
                 # scored as if the rook in front of it were a wall.
-                attacks = ZERO
                 if kind == KNIGHT:
                     attacks = KNIGHT_ATTACKS[square]
                 elif kind == BISHOP:
@@ -321,14 +364,13 @@ def evaluate(bb: np.ndarray, st: np.ndarray) -> int:
                 else:
                     attacks = queen_attacks(U64(square), occupancy)
 
+                scratch[slot + kind] |= attacks
+                twice |= covered & attacks
+                covered |= attacks
+
                 moves = int(popcount(attacks & safe))
                 mg += sign * MOBILITY_MG[kind, moves]
                 eg += sign * MOBILITY_EG[kind, moves]
-
-                zone_hits = attacks & enemy_zone
-                if zone_hits:
-                    attacker_count[side] += 1
-                    danger[side] += ATTACK_WEIGHT[kind] * int(popcount(zone_hits))
 
                 if kind == ROOK:
                     file_index = square & 7
@@ -352,16 +394,34 @@ def evaluate(bb: np.ndarray, st: np.ndarray) -> int:
                     ):
                         mg += sign * KNIGHT_OUTPOST_MG
                         eg += sign * KNIGHT_OUTPOST_EG
+                elif kind == BISHOP:
+                    # A bishop hemmed in by its own pawns on its own colour is worth less.
+                    same_colour = DARK_SQUARES if (ONE << U64(square)) & DARK_SQUARES else (
+                        ~DARK_SQUARES
+                    )
+                    blocked = int(popcount(friendly_pawns & same_colour))
+                    mg -= sign * BAD_BISHOP_MG * blocked
+                    eg -= sign * BAD_BISHOP_EG * blocked
+
+        # The king's own placement, scored from its table like everything else.
+        king_square = king_squares[side]
+        mg += sign * MG_TABLE[base + KING, king_square]
+        eg += sign * EG_TABLE[base + KING, king_square]
+
+        scratch[slot + 6] = covered
+        scratch[slot + 7] = twice
 
         if popcount(bb[base + BISHOP]) >= U64(2):
             mg += sign * BISHOP_PAIR_MG
             eg += sign * BISHOP_PAIR_EG
 
-        # Pawn structure.
         pawns = friendly_pawns
         while pawns:
             square = lsb(pawns)
             pawns &= pawns - ONE
+            phase += PHASE_ARRAY[PAWN]
+            mg += sign * MG_TABLE[base + PAWN, square]
+            eg += sign * EG_TABLE[base + PAWN, square]
             file_index = square & 7
             file_bb = FILES[file_index]
             neighbours = ADJACENT_FILES[file_index] & friendly_pawns
@@ -380,41 +440,105 @@ def evaluate(bb: np.ndarray, st: np.ndarray) -> int:
                 relative_rank = (square >> 3) if side == WHITE else 7 - (square >> 3)
                 mg += sign * PASSED_MG[relative_rank]
                 eg += sign * PASSED_EG[relative_rank]
+                # A passer matters far more when the path in front of it is clear, and in the
+                # endgame when the defending king is far away and ours is close.
+                stop = square + 8 if side == WHITE else square - 8
+                if 0 <= stop < 64 and not (occupancy & (ONE << U64(stop))):
+                    eg += sign * (PASSED_EG[relative_rank] // 4)
+                enemy_distance = _king_distance(king_squares[1 - side], stop)
+                own_distance = _king_distance(king_square, stop)
+                eg += sign * _divide((enemy_distance * 6 - own_distance * 4) * relative_rank, 4)
             elif neighbours and not (PAWN_ATTACKS[1 - side, square] & friendly_pawns):
-                # No friendly pawn can ever defend it from behind on an adjacent file.
                 if not (neighbours & ~FRONT_SPAN[side, square] & ~file_bb):
                     mg += sign * BACKWARD_MG
                     eg += sign * BACKWARD_EG
 
-        # Pawn shelter in front of the king, and open files pointing at it.
-        king_square = king_squares[side]
         king_file = king_square & 7
         start = king_file - 1 if king_file > 0 else 0
-        stop = king_file + 1 if king_file < 7 else 7
-        for f in range(start, stop + 1):
+        stop_file = king_file + 1 if king_file < 7 else 7
+        for f in range(start, stop_file + 1):
             file_bb = FILES[f]
             if not (file_bb & friendly_pawns):
                 mg += sign * SHIELD_MISSING_MG
                 if not (file_bb & enemy_pawns):
                     mg += sign * OPEN_FILE_ON_KING_MG
 
+    # Second pass: the terms that need to see both sides' attack maps at once.
     for side in range(2):
         sign = 1 if side == WHITE else -1
-        if attacker_count[side] >= 2:
-            index = danger[side] // 12
-            if index > 79:
-                index = 79
-            mg += sign * KING_DANGER[index]
+        us = side * 8
+        them = (1 - side) * 8
+        base = side * 6
+        enemy_base = (1 - side) * 6
+
+        enemy_minors = bb[enemy_base + KNIGHT] | bb[enemy_base + BISHOP]
+        enemy_majors = bb[enemy_base + ROOK] | bb[enemy_base + QUEEN]
+        enemy_pieces = enemy_minors | enemy_majors
+
+        # What we are attacking that is worth more than the attacker.
+        threatened = pawn_attacks[side] & enemy_pieces
+        count = int(popcount(threatened))
+        mg += sign * PAWN_THREAT_MG * count
+        eg += sign * PAWN_THREAT_EG * count
+
+        threatened = (scratch[us + KNIGHT] | scratch[us + BISHOP]) & enemy_majors
+        count = int(popcount(threatened))
+        mg += sign * MINOR_THREAT_MG * count
+        eg += sign * MINOR_THREAT_EG * count
+
+        threatened = scratch[us + ROOK] & bb[enemy_base + QUEEN]
+        count = int(popcount(threatened))
+        mg += sign * ROOK_THREAT_MG * count
+        eg += sign * ROOK_THREAT_EG * count
+
+        # Pieces of theirs we attack and they do not defend.
+        hanging = enemy_pieces & scratch[us + 6] & ~scratch[them + 6]
+        count = int(popcount(hanging))
+        mg += sign * HANGING_MG * count
+        eg += sign * HANGING_EG * count
+
+        # King safety, measured as danger to the enemy king.
+        if bb[base + QUEEN]:
+            enemy_king = king_squares[1 - side]
+            zone = king_zones[1 - side]
+            danger = 0
+            attackers = 0
+            for kind in range(1, 5):
+                hits = scratch[us + kind] & zone
+                if hits:
+                    attackers += 1
+                    danger += ATTACK_WEIGHT[kind] * int(popcount(hits)) // 2
+
+            # Zone squares we attack that they barely defend.
+            weak = zone & scratch[us + 6] & ~scratch[them + 7]
+            danger += 4 * int(popcount(weak))
+
+            # Squares from which a check would not simply lose the checking piece.
+            free = ~bb[OCC_W + side] & (~scratch[them + 6] | (weak & scratch[us + 7]))
+            king_bb = U64(enemy_king)
+            checks = KNIGHT_ATTACKS[enemy_king] & scratch[us + KNIGHT] & free
+            danger += 113 * int(popcount(checks))
+            diagonal = bishop_attacks(king_bb, occupancy)
+            checks = diagonal & scratch[us + BISHOP] & free
+            danger += 154 * int(popcount(checks))
+            straight = rook_attacks(king_bb, occupancy)
+            checks = straight & scratch[us + ROOK] & free
+            danger += 216 * int(popcount(checks))
+            checks = (diagonal | straight) & scratch[us + QUEEN] & free & ~scratch[them + KING]
+            danger += 172 * int(popcount(checks))
+
+            if attackers >= 2 and danger > 0:
+                if danger > 620:
+                    danger = 620
+                mg += sign * (danger * danger // 1936)
+                eg += sign * (danger // 6)
 
     if phase > PHASE_MAX:
         phase = PHASE_MAX
-    score = (mg * phase + eg * (PHASE_MAX - phase)) // PHASE_MAX
+    score = _divide(mg * phase + eg * (PHASE_MAX - phase), PHASE_MAX)
     score += TEMPO if st[ST_SIDE] == WHITE else -TEMPO
-
-    # A side with no pawns and a small material edge cannot usually convert it.
     score = _scale_drawish(bb, score)
-
-    return score if st[ST_SIDE] == WHITE else -score
+    return int(score if st[ST_SIDE] == WHITE else -score)
 
 
 @njit(int64(uint64[::1]), cache=False)

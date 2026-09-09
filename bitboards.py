@@ -319,8 +319,11 @@ DEBRUIJN_INDEX = _DEBRUIJN_INDEX
 
 @njit(inline="always", cache=False)
 def lsb(bb: np.uint64) -> int:
-    """Index of the least significant set bit. Undefined for an empty board, never called with one."""
-    return DEBRUIJN_INDEX[((bb & (uint64(0) - bb)) * _DEBRUIJN) >> uint64(58)]
+    """Index of the least significant set bit.
+
+    Undefined for an empty board, which is never passed one.
+    """
+    return int(DEBRUIJN_INDEX[((bb & (uint64(0) - bb)) * _DEBRUIJN) >> uint64(58)])
 
 
 @njit(inline="always", cache=False)

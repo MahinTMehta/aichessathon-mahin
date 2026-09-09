@@ -70,7 +70,14 @@ def parse(fen: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int
         mover = st[ST_SIDE]
         # Record it only when a capture actually exists, matching what make_move stores, so the
         # same playable position always hashes the same.
-        if PAWN_ATTACKS[mover, target] & bb[(1 - mover) * 6]:
+        #
+        # The pawns that can capture on `target` belong to the side to move, and they stand on
+        # the squares from which one of their pawns attacks `target` — which is the *opponent's*
+        # attack mask read from `target`, because pawn attacks are only symmetric that way
+        # round. Getting this backwards made the engine blind to every en passant capture
+        # available on the move it was actually being asked about, and in the rare position
+        # where en passant is the only legal move it produced no move at all.
+        if PAWN_ATTACKS[1 - mover, target] & bb[mover * 6]:
             st[ST_EP] = target
 
     key = np.zeros(1, dtype=np.uint64)
