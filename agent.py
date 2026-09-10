@@ -26,6 +26,7 @@ _IMPORT_STARTED = time.perf_counter()
 import numpy as np  # noqa: E402
 
 from bitboards import KING, MAX_MOVES, MAX_PLY, ST_SIDE, lsb  # noqa: E402
+from evaluate import ESCRATCH_SIZE  # noqa: E402
 from fen import parse, to_uci  # noqa: E402
 from position import generate, is_attacked, make_move  # noqa: E402
 from search import NO_MOVE, TT_SIZE, search_root  # noqa: E402
@@ -69,7 +70,7 @@ _evals = np.zeros(MAX_PLY + 8, dtype=np.int32)
 _repetition = np.zeros(MAX_GAME_PLIES + MAX_PLY + 8, dtype=np.uint64)
 _info = np.zeros(16, dtype=np.int64)
 # Attack maps the evaluation fills in, kept here so evaluating costs no allocation.
-_escratch = np.zeros(16, dtype=np.uint64)
+_escratch = np.zeros(ESCRATCH_SIZE, dtype=np.uint64)
 
 # Positions the game has actually passed through, so a search never walks into a repetition
 # that the referee would claim as a draw. Index 0 is the first position we were asked about.

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bitboards import MAX_MOVES, MAX_PLY
 from fen import parse, to_uci
+from evaluate import ESCRATCH_SIZE
 from search import TT_SIZE, search_root
 
 FAR = 1e18
@@ -46,7 +47,7 @@ class Player:
         self.stack = np.zeros(MAX_PLY + 8, dtype=np.int32)
         self.evals = np.zeros(MAX_PLY + 8, dtype=np.int32)
         self.repetition = np.zeros(2000, dtype=np.uint64)
-        self.escratch = np.zeros(16, dtype=np.uint64)
+        self.escratch = np.zeros(ESCRATCH_SIZE, dtype=np.uint64)
         self.info = np.zeros(16, dtype=np.int64)
         self.length = 0
 
@@ -100,8 +101,12 @@ def main() -> None:
     with destination.open("w") as handle:
         for game in range(games):
             board = chess.Board(openings[rng.randrange(len(openings))])
-            # A couple of random moves so the same opening does not give the same game twice.
-            for _ in range(rng.randint(0, 3)):
+            # Random moves before the engine takes over, so the same opening does not give the
+            # same game twice. Eight rather than three, because 738,000 positions generated from
+            # 260 openings deduplicated down to 521,000 and then bought nothing: past a point the
+            # games are revisiting positions the set already has. What is scarce is not positions,
+            # it is starting points.
+            for _ in range(rng.randint(0, 8)):
                 legal = list(board.legal_moves)
                 if not legal:
                     break

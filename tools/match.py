@@ -64,7 +64,7 @@ class Worker:
 
 
 def play_game(
-    white: Worker, black: Worker, fen: str, nodes: int
+    white: Worker, black: Worker, fen: str, nodes: int, cand_nodes: int
 ) -> tuple[str, str]:
     board = chess.Board(fen)
     for worker in (white, black):
@@ -86,7 +86,8 @@ def play_game(
 
         mover = white if board.turn == chess.WHITE else black
         waiter = black if board.turn == chess.WHITE else white
-        reply = mover.send({"cmd": "move", "fen": board.fen(), "nodes": nodes})
+        budget = cand_nodes if mover.name == "candidate" else nodes
+        reply = mover.send({"cmd": "move", "fen": board.fen(), "nodes": budget})
         uci = str(reply["move"])
         try:
             move = chess.Move.from_uci(uci)
@@ -132,6 +133,10 @@ def main() -> int:
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--games", type=int, default=200)
     parser.add_argument("--nodes", type=int, default=120_000)
+    # A change that makes the evaluation slower buys fewer nodes in the same wall clock, and a
+    # node-limited match cannot see that. Hand the candidate the node count its measured speed
+    # actually affords in the time the baseline uses, and the match measures the whole trade.
+    parser.add_argument("--cand-nodes", type=int, default=0)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--openings", type=Path, default=DEFAULT_OPENINGS)
     arguments = parser.parse_args()
@@ -139,6 +144,9 @@ def main() -> int:
     openings = [
         line.strip() for line in arguments.openings.read_text().splitlines() if line.strip()
     ]
+    cand_nodes = arguments.cand_nodes or arguments.nodes
+    if cand_nodes != arguments.nodes:
+        print(f"baseline {arguments.nodes:,} nodes, candidate {cand_nodes:,}", flush=True)
     base = Worker(arguments.baseline.resolve(), "baseline")
     cand = Worker(arguments.candidate.resolve(), "candidate")
 
@@ -148,7 +156,9 @@ def main() -> int:
             fen = openings[(index // 2) % len(openings)]
             candidate_is_white = index % 2 == 0
             white, black = (cand, base) if candidate_is_white else (base, cand)
-            result, termination = play_game(white, black, fen, arguments.nodes)
+            result, termination = play_game(
+                white, black, fen, arguments.nodes, cand_nodes
+            )
             if result == "draw":
                 draws += 1
             elif (result == "white") == candidate_is_white:

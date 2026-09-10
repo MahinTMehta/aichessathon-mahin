@@ -36,6 +36,7 @@ from bitboards import (
     queen_attacks,
     rook_attacks,
 )
+from nnue import ACC_BASE, ACC_SIZE, ENABLED, nnue_correction
 
 U64 = np.uint64
 ONE = U64(1)
@@ -290,6 +291,13 @@ def _scale_drawish(bb: np.ndarray, score: int) -> int:
     return score
 
 
+# Sixteen slots of attack maps, then the network's accumulator. One buffer rather than two keeps
+# the network out of every signature between here and the root.
+ESCRATCH_SIZE = ACC_BASE + ACC_SIZE
+USE_NNUE = ENABLED
+NNUE_CLAMP = 96
+
+
 @njit(int64(uint64[::1], int64[::1], uint64[::1]), cache=False)
 def evaluate(bb: np.ndarray, st: np.ndarray, scratch: np.ndarray) -> int:
     """Score the position in centipawns, from the side to move's point of view.
@@ -537,6 +545,22 @@ def evaluate(bb: np.ndarray, st: np.ndarray, scratch: np.ndarray) -> int:
         phase = PHASE_MAX
     score = _divide(mg * phase + eg * (PHASE_MAX - phase), PHASE_MAX)
     score += TEMPO if st[ST_SIDE] == WHITE else -TEMPO
+    if USE_NNUE:
+        # The network is a correction, on the same scale as everything above it but from the side
+        # to move's point of view rather than White's.
+        #
+        # It is bounded, and it is applied before the drawish scaling rather than after. Both are
+        # about the same thing: the network was fitted on positions from real games, and a search
+        # spends most of its time in positions no game would ever reach. There its answer is an
+        # extrapolation, and an unbounded extrapolation was seen to reach 786 centipawns. Inside
+        # the bound it can still say everything it usefully has to say - it moves the evaluation
+        # by 84 centipawns on average - and outside it, it can no longer overrule material.
+        correction = nnue_correction(bb, st[ST_SIDE], scratch)
+        if correction > NNUE_CLAMP:
+            correction = NNUE_CLAMP
+        elif correction < -NNUE_CLAMP:
+            correction = -NNUE_CLAMP
+        score += correction if st[ST_SIDE] == WHITE else -correction
     score = _scale_drawish(bb, score)
     return int(score if st[ST_SIDE] == WHITE else -score)
 
