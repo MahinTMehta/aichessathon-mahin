@@ -5,3 +5,5 @@ __pycache__/
 submission.zip
 *.pgn
 tools/stockfish.exe
+tools/all_positions.txt
+tools/labelled_data.txt.gz
