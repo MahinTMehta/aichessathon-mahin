@@ -1,0 +1,26 @@
+   2  +1 =1 -0  score 75.0% [26.0, 100.0]  elo +191  worst clock 7.2s
+   4  +1 =3 -0  score 62.5% [38.0, 87.0]  elo +89  worst clock 7.2s
+   6  +1 =3 -2  score 41.7% [11.6, 71.8]  elo -58  worst clock 7.2s
+   8  +1 =5 -2  score 43.8% [21.5, 66.0]  elo -44  worst clock 7.2s
+  10  +1 =7 -2  score 45.0% [27.4, 62.6]  elo -35  worst clock 7.2s
+  12  +1 =9 -2  score 45.8% [31.3, 60.4]  elo -29  worst clock 5.8s
+  14  +1 =11 -2  score 46.4% [34.0, 58.9]  elo -25  worst clock 5.8s
+  16  +1 =13 -2  score 46.9% [36.0, 57.7]  elo -22  worst clock 5.8s
+  18  +1 =15 -2  score 47.2% [37.6, 56.8]  elo -19  worst clock 5.8s
+  20  +1 =17 -2  score 47.5% [38.9, 56.1]  elo -17  worst clock 5.8s
+  22  +2 =18 -2  score 50.0% [40.9, 59.1]  elo -0  worst clock 5.8s
+  24  +2 =19 -3  score 47.9% [38.6, 57.2]  elo -14  worst clock 5.8s
+  26  +2 =21 -3  score 48.1% [39.5, 56.6]  elo -13  worst clock 5.8s
+  28  +2 =23 -3  score 48.2% [40.3, 56.2]  elo -12  worst clock 5.8s
+  30  +2 =25 -3  score 48.3% [40.9, 55.7]  elo -12  worst clock 5.8s
+  32  +2 =27 -3  score 48.4% [41.5, 55.4]  elo -11  worst clock 5.8s
+  34  +2 =29 -3  score 48.5% [42.0, 55.1]  elo -10  worst clock 5.8s
+  36  +2 =31 -3  score 48.6% [42.5, 54.8]  elo -10  worst clock 5.8s
+  38  +2 =33 -3  score 48.7% [42.9, 54.5]  elo -9  worst clock 5.8s
+  40  +2 =35 -3  score 48.8% [43.2, 54.3]  elo -9  worst clock 5.8s
+
+40 games at 120s + 0.5s
+  score 48.8%  [43.2, 54.3]  elo -9
+  clock floor: worst 5.8s, median 17.2s
+
+[exited with code 0]
