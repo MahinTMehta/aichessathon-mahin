@@ -10,7 +10,7 @@ The engine itself lives beside this file:
     position.py    board state, move encoding, move generation, make/unmake
     evaluate.py    tapered hand-crafted evaluation
     search.py      negamax with alpha-beta, and the pruning that makes it worth running
-    fen.py         FEN parsing and UCI formatting
+    fen.py         FEN parsing and UCI formatting    
 """
 
 import os
