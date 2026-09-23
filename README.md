@@ -1,104 +1,155 @@
-# AI Chessathon starter
+# Queen Mary's Gambit — AI Chessathon 2026
 
-Fork this to build an agent for [AI Chessathon](https://aichessathon.com). It gives you a working
-submission, baselines to beat, and a local harness that speaks the same protocol and enforces the
-same clock as the platform, so you can see whether a change actually helped before you upload it.
+A chess engine written in Python and compiled with numba, built by a two-person team for the
+Optiver-sponsored AI Chessathon (Encode Club, London, September 2026).
+
+**Result:** 47th of 334 teams in the 13-round qualification Swiss (8.5/13, top entry of ten
+from Queen Mary) out of 465 registered, reaching the 50-seat London final on 12 September,
+where it placed 34th. Around 750k positions a second on a single core. No crashes, illegal
+moves, timeouts or init failures across more than 60 platform games.
+
+The competition allowed no native code, no third-party engines and no borrowed networks, so
+everything here is Python running on one core under a 120 s + 0.5 s clock.
+
+---
+
+## Which build is which
+
+The engine that played the final was developed in a separate working copy under time pressure
+on the day and was never committed to this repository. It matters, because the two builds
+differ in ways that change the numbers below.
+
+| | committed (`HEAD`) | final day, 12 Sep |
+|---|---|---|
+| network | 768→64→1, int16, trained on 1,333,166 positions | same shape, 4,112,952 positions |
+| correction bound | ±96 cp | ±256 cp |
+| correction history | no | yes, 14-bit table keyed on pawn structure |
+| contempt | none | 30 cp against the side to move |
+| mate drive with bare king | no | yes |
+| checkmate vs fifty-move | draw wins | checkmate wins |
+| compilation | eager at import, 90 s budget | deferred with pinned signatures, 30 s budget |
+| init on the platform | 36–40 s | 10.5–11.3 s |
+| transposition table | 2²⁴ slots, 4-way buckets, 256 MiB | same |
+
+The final-day source is at `dist/agent-final-day.zip`; every number below says which build it
+belongs to.
+
+## Layout
 
 ```
-git clone https://github.com/advitrocks9/aichessathon-starter
-cd aichessathon-starter
-make setup
-make play
+agent.py        entry point: FEN in, UCI move out, and the clock
+bitboards.py    attack tables, magic bitboards, zobrist keys
+position.py     board state, move encoding, move generation, make/unmake
+evaluate.py     tapered hand-crafted evaluation plus the network's bounded correction
+nnue.py         the network (768 -> 64 -> 1, int16 weights, int32 accumulator)
+search.py       negamax, alpha-beta, PVS, iterative deepening, and the pruning
+fen.py          FEN parsing and UCI formatting
+tools/          the A/B rig (match.py, worker.py), training pipeline, benchmarks
+tests/          perft, en passant, mirror-symmetry fuzz, tactics
+harness/        the organisers' local runner, unchanged
+baselines/      the starter kit's reference agents
+notes/          working notes kept from the competition
+ENGINE.md       design notes and the full measurement history
 ```
 
-That plays your agent against a baseline over a full 120 s + 0.5 s game and prints the result.
-When you like it, `make zip` and drop `submission.zip` on your dashboard.
+## The engine
 
-## Writing an agent
+**Search.** Iterative deepening with aspiration windows, principal-variation search, and a
+four-way-bucket transposition table that persists across the game. Move ordering: the table
+move, then captures by MVV-LVA split on static exchange evaluation, killers, counter-moves,
+history and continuation history. Pruning: null move, reverse futility, razoring, futility,
+late-move pruning and reductions, and SEE pruning of losing captures. Quiescence over captures
+only.
 
-`agent.py` is the whole submission. One function:
+**Evaluation.** Tapered midgame and endgame scoring over material, piece-square tables,
+mobility, pawn structure, the bishop pair, rook and knight terms, threats, and king safety
+built on safe checks. Every term is symmetric, and a fuzz test asserts that a position and its
+mirror score identically, which caught three sign-rounding bugs.
 
-```python
-def get_move(fen: str, time_left_ms: int) -> str:
-    return "e2e4"
-```
+**Network.** A 768→64→1 network with int16 weights and integer arithmetic throughout, fitted
+to Stockfish depth-8 labels but predicting the *residual* between that label and the
+hand-crafted evaluation rather than the score itself. Its output is hard-bounded. Unbounded it
+overrules material in positions the training data never covered, and measured worse than no
+network at all; bounded it was the largest single gain in the project.
 
-The fork ships a legal random-mover, so the loop works before you write anything. Replace the body.
+**Time management.** Soft and hard deadlines derived from the clock actually handed over,
+extended while the best move is still changing and cut once it has held for several
+iterations. The regression test is a full self-play game at the real time control.
 
-```
-make play                                          # one game, real time control
-make arena                                         # 16 fast games, prints a score
-make play FEN="<fen>"                              # start from a given position
-uv run python -m harness.play --black baselines/minimax --pgn game.pgn
-uv run python -m harness.arena --opponent ../my-old-version --games 200
-uv run python -m harness.arena --pgn-dir games
-```
+## How decisions were made
 
-Anything your agent prints shows up under the result, so `print` debugging works. The platform
-keeps the first 4 KB and the last 4 KB, and so does the harness. Every rated game leaves a log on
-your dashboard beside the PGN with your output, your init time, your move times and your clock.
-Only your team can read it.
+`tools/match.py` plays two builds against each other from a large opening set, alternating
+colours, with both sides on the same **node** budget so machine timing drops out, and reports a
+95% interval. A change shipped only when that interval cleared zero.
 
-Games replay. The opening and the baseline's seed both come from the game number, so a
-deterministic agent plays the same games every run and a score change is a change you made. The
-random mover it ships with is not, so `make arena` wanders until you replace it.
+Figures below are from matches run with a correctly sized harness and with both arms recorded:
 
-## The ladder
-
-Measured with `harness/arena.py`. Beating greedy is a search. Beating minimax is a search plus an
-evaluation worth searching with.
-
-| Matchup | Games | Time control | Score |
+| change | elo | 95% CI | n |
 |---|---|---|---|
-| random vs greedy | 32 | 10 s + 0.1 s | 4.7% +- 5.1% (+0 =3 -29) |
-| greedy vs minimax | 16 | 120 s + 0.5 s | 0.0% (+0 =0 -16) |
-| numba vs minimax | 16 | 10 s + 0.5 s | 59.4% +- 16.1% (+5 =9 -2) |
+| network bounded at ±128, vs no network | +68 | [+18, +120] | 140 |
+| tightening the bound ±128 → ±96 | +50 | [+6, +95] | 140 |
+| training data 602k → 812k positions | +48 | [+8, +89] | 190 |
+| training data 812k → 1.33M positions | +51 | [+8, +96] | 130 |
+| network unbounded, vs no network *(rejected)* | −31 | [−94, +30] | 90 |
+| wider first layer with output buckets *(rejected)* | −81 | [−155, −13] | 70 |
+| eight output buckets, independent SPRT *(rejected)* | −88 | [−139, −40] | 150 |
 
-Read the third row twice. 59.4% looks like an edge, but the interval runs from -47 to +195 elo,
-so sixteen games have not found one. That is why `make arena` prints it.
+`ENGINE.md` carries the full table, including rows measured before the harness was audited and
+rows whose arms were not recorded. Those are labelled rather than deleted, because the honest
+version of a measurement log includes the measurements you can no longer stand behind.
+
+Several changes that ultimately failed looked strong early. Capture history read +120 Elo after
+30 games and finished at −3 over 200. Thirty games is worth nothing, and the rig existed
+largely to stop us acting on runs that size.
+
+Changes that never separated from zero are not claimed as gains anywhere in this repository.
+That includes correction history (+19, [−3, +42], n=578), the mate drive, contempt, and the
+final build against its immediate predecessor (+16, [−27, +58], n=178). Correction history
+ships in the final build regardless: it was free at the margin and the point estimate was
+positive, but it was not demonstrated.
+
+**Correctness** was checked separately from strength, because a stronger engine that is
+occasionally wrong is worse than a weaker one that never is:
+
+- `tests/test_perft.py` — exact node counts against known perft values, all matching
+- `tests/test_en_passant.py` — 3,804 positions against python-chess, no mismatches
+- `tests/test_fuzz.py` — mirror-symmetry fuzz over the evaluation
+- `tests/test_tactics.py` — informational tactical suite at a fixed time per move
+
+## The final-day rule change
+
+On the morning of the final the organisers cut the start-up budget from 90 s to 30 s.
+Compilation was restructured to defer with pinned type signatures, bringing init from 36–40 s
+down to 10.5–11.3 s with play verified identical to the previous build on every test position.
+Several opposing entries forfeited under the same rule.
+
+## Running it
 
 ```
-uv run python -m harness.arena --agent baselines/random --opponent baselines/greedy --games 32
-uv run python -m harness.arena --agent baselines/greedy --opponent baselines/minimax --games 16 \
-  --base-ms 120000 --increment-ms 500
-uv run python -m harness.arena --agent baselines/numba --opponent baselines/minimax --games 16 \
-  --increment-ms 500
+uv sync
+uv run python tests/test_perft.py
+uv run python tests/test_en_passant.py
+uv run python tests/test_fuzz.py 8
+uv run python -m harness.play --white . --black baselines/minimax
 ```
 
-- `baselines/random` plays a uniformly random legal move. It is what `agent.py` starts as, minus
-  the seed the baselines take from the harness.
-- `baselines/greedy` searches one ply on material.
-- `baselines/minimax` searches two plies on material and mobility, with no time management.
-- `baselines/numba` is `minimax` with the evaluation jitted. It is barely stronger, which is
-  the point: jitting a shallow search buys headroom, not depth. Read it for the warm-up call
-  at the bottom, which is how you keep compilation off your clock.
+The tests are scripts with a `main()`, not pytest tests, so `pytest tests/` collects nothing.
 
-## What's here
+## Known defects
 
-```
-agent.py             your submission
-baselines/           random, greedy, minimax, numba; each is a directory with an agent.py
-harness/runner.py    the process the platform runs your agent in
-harness/referee.py   the clock, legality, draw and cap rules
-harness/rules.py     the event constants, and eight openings the rated ladder plays
-harness/sandbox.py   the one process, spoken to as the platform speaks to a container
-harness/play.py      one game between two agent directories
-harness/arena.py     many games, with a score and an interval
-harness/package.py   builds submission.zip and plays the platform's two smoke games from it
-docs/IDEAS.md        where the strength actually comes from
-```
+`tools/worker.py`, `tools/bench.py` and `tests/test_fuzz.py` allocate a 16-slot evaluation
+scratch buffer where `evaluate.py` declares 144. Nothing in any shipped `evaluate.py` or
+`nnue.py` writes past slot 15 — verified over 20,000 positions against a canary-filled array —
+so no result here was affected, but the allocation should be corrected before that buffer is
+used for what its size implies.
 
-`make zip` ships `agent.py`, every python file beside it, `weights/`, and any package you import.
-Add the rest with `--include`. It then plays two smoke games out of the zip it just built, so a
-file you never packaged fails here instead of on the platform.
+## Attribution
 
-Local games start from one of the eight openings unless you pass `--fen`. Rated games draw from
-the full set, which is not published. Treat the eight as a sample, not preparation.
+`harness/` and `baselines/` come from the public competition starter kit. Everything else is
+ours. Stockfish was used offline to label training positions, which the rules permit; nothing
+from it ships, and the network was trained from scratch (`tools/nnue_train.py`). AI coding
+assistants were used during development, which the rules also permit provided the team can
+explain the code; the architecture, the measurement methodology and every number above are
+ours, and the notes those assistants worked from are kept in `notes/`.
 
-The platform decides acceptance and its validation log is the authority. The smoke games are
-here so a broken zip costs a minute, not one of your ten daily uploads.
-
-## The rules
-
-[aichessathon.com/docs](https://aichessathon.com/docs) is canonical and changes. Read it before
-you upload.
+MIT licence.
