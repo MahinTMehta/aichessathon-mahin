@@ -1,5 +1,15 @@
 # The engine
 
+> **Which build this file describes.** This document was written on 10 September 2026 for the
+> committed engine (`bb0b823`): network bound ±96, contempt 0, no correction history, eager
+> compilation, 90 s init budget. The build that played the London final on 12 September is
+> **not in this repository's history** (see `README.md` and `notes/`): it used the same
+> architecture with a different `weights/net.npz`, a ±256 bound, contempt 30, correction
+> history, a bare-king mate drive, and deferred compilation for the 30 s init budget. Numbers
+> below are the Sep-10 build's unless marked otherwise. Also stale in this file: the
+> transposition table is 2^24 slots (~256 MiB), not 2^22, in every committed `search.py`
+> since `5377cb2` (`TT_BITS = 24`, search.py:79).
+
 `agent.py` is the submission entry point. Everything under it is a conventional bitboard chess
 engine written so that numba can compile it, which is the only reason the node counts are in
 the millions rather than the thousands.
@@ -118,6 +128,8 @@ can no longer overrule material.
 | 256 | −162 |
 | unbounded | −31 |
 
+The same audit applies to this table: 128 and unbounded are recorded matches (+68 [+18,+120] n=140; −31 [−94,+30] n=90); 96 is 128's result plus a second match (+50 [+6,+95] n=140); 64 is that plus a 40-game −9; 256 has no matching record. See the harness note under "How anything here was decided".
+
 The bound is a hard truncation, and that turns out to matter. Letting the excess through at an
 eighth of its size past 96 — which keeps the order between two positions the truncation makes
 identical, and looks like the more careful thing to do — cost 53 elo. Whatever the network is
@@ -208,31 +220,61 @@ On the current build a 144-ply game bottoms out near 17 seconds and climbs from 
 alternating colours, giving both sides the same **node** budget so the comparison carries no
 timing noise, and prints a 95% interval. A change is kept when the interval clears zero.
 
+### A note on the harness, before the numbers
+
+Every row below was produced by `tools/match.py`, which plays both sides through
+`tools/worker.py`. `notes/CLAUDE_FINDINGS_TESTING.md` reports that the committed `tools/worker.py`
+allocates a 16-slot evaluation scratch buffer (`tools/worker.py:55`) while `evaluate.py` declares
+`ESCRATCH_SIZE = 144` once the network is present, and concludes that every measurement in this
+table is suspect. Two things were established on 22 September 2026 when this table was audited:
+
+1. **The buffer is never written past slot 15.** `nnue_correction` keeps its accumulator in a
+   local array and never indexes `scratch` (`nnue.py:73-129`); `evaluate.py` writes only
+   `scratch[0..15]` (attack maps, `evaluate.py:331-420`). Checked empirically: 20,000 positions
+   evaluated with a 16-slot buffer and with a 144-slot buffer gave identical scores and zero
+   writes outside the 16-slot view, on both the committed and the final-day engine. The
+   undersized allocation is a latent bug in the tooling (`tools/worker.py:55`,
+   `tools/bench.py:57`, `tests/test_fuzz.py:24` — still unfixed in this repository), not a
+   corruption of any past result.
+2. **The development copy that produced every network row already had the fix.** The matches
+   were run in a separate working copy in which `tools/worker.py` allocated `ESCRATCH_SIZE`
+   from the first network candidate onward (10 Sep 00:40 UTC); the corrected file was never
+   pushed back to this repository.
+
+The labels in the last column therefore mean: **post-fix** — both sides ran through a worker
+allocating `ESCRATCH_SIZE`, and the raw match log with n and interval was found;
+**pre-fix** — measured before that change, but neither side had a network, so the 16-slot
+buffer was the correct size; **unverified** — no raw match record could be found, so the number
+rests on this document alone. Several rows are not single measurements: the +118 is the sum of
+two matches (+68 for the network at a ±128 bound, then +50 for tightening it to ±96); the +66
+was an interim reading at 90 games that finished at **+48 [+8, +89] over 190**; the ±64 row is
++118 plus a 40-game −9. Intervals are 95%, node-limited at 60,000 nodes a move unless noted.
+
 That rig is the reason most of what was tried is not here. Measured over 100–350 games each:
 
-| change | elo | kept |
-|---|---|---|
-| the network, bounded at 96 centipawns | +118 | yes |
-| a third more positions to fit it to | +66 | yes |
-| another 521,000 positions, 1.33M in all | +51 | yes |
-| threats and safe-check king safety | +114 | yes |
-| tuned evaluation weights | +55 | yes |
-| continuation history | +35 | yes |
-| capture history | −3 | no |
-| search retune (IIR, LMR curve) | 0 | no |
-| pawn storms and space | +5 | no |
-| singular extensions | −28 | no |
-| phalanx passers, rooks behind passers | −30 | no |
-| distilled piece-square tables | 0 | no |
-| the network, unbounded | −31 | no |
-| the network, bounded at 256 | −162 | no |
-| the network, bound compressed rather than hard | −53 | no |
-| incremental accumulator, int16, threaded | 0 | no |
-| incremental accumulator in the key array | slower | no |
-| network at L1=128 with output buckets | −81 | no |
-| the network, trained on 2x the positions, half of them random | −21 | no |
-| the network, fitted only inside the bound | −12 | no |
-| singular extensions at 150,000 nodes | +9 | no |
+| change | elo | kept | harness / evidence |
+|---|---|---|---|
+| the network, bounded at 96 centipawns | +118 | yes | post-fix, derived: +68 [+18,+120] n=140 (bound 128 vs none) + +50 [+6,+95] n=140 (96 vs 128); never measured as one match |
+| a third more positions to fit it to | +66 | yes | post-fix; +66 [+9,+128] was the n=90 interim, final +48 [+8,+89] n=190 |
+| another 521,000 positions, 1.33M in all | +51 | yes | post-fix; +51 [+8,+96] n=130 |
+| threats and safe-check king safety | +114 | yes | pre-fix (no network in either arm); two 60-game runs pooled, +114 [+57,+177] n=120 |
+| tuned evaluation weights | +55 | yes | pre-fix (no network); two runs pooled, +55 [+28,+83] n=350 |
+| continuation history | +35 | yes | unverified: no raw log matching +35 was found |
+| capture history | −3 | no | pre-fix (no network); −3 [−41,+34] n=200 (+120 at 30 games, as the text says) |
+| search retune (IIR, LMR curve) | 0 | no | unverified: candidate logs exist (0 at n=70, 0 at n=30) but the arms are not recorded |
+| pawn storms and space | +5 | no | pre-fix (no network); +5 [−55,+65] n=70, arms inferred from the log name |
+| singular extensions | −28 | no | pre-fix (no network); two runs pooled, −28 [−73,+16] n=150 |
+| phalanx passers, rooks behind passers | −30 | no | pre-fix (no network); −30 [−101,+39] n=70, arms inferred from the log name |
+| distilled piece-square tables | 0 | no | pre-fix (no network); recorded as +3 [−47,+54] n=100 |
+| the network, unbounded | −31 | no | post-fix; −31 [−94,+30] n=90 |
+| the network, bounded at 256 | −162 | no | unverified: no log gives −162; nearest record is −223 [−327,−146] n=60 for 256 vs 128 on a different (1.17M) net. The final-day build shipped a ±256 bound on a later net, where 256 vs 96 read +21 [−53,+96] n=50 and, in a second run whose arms were not logged, +81 [+29,+137] n=100 |
+| the network, bound compressed rather than hard | −53 | no | post-fix; −53 [−141,+30] n=40 |
+| incremental accumulator, int16, threaded | 0 | no | unverified: a speed bench, no games |
+| incremental accumulator in the key array | slower | no | unverified: a speed bench, no games |
+| network at L1=128 with output buckets | −81 | no | post-fix; −81 [−155,−13] n=70, candidate given 52,900 nodes for its slower evaluation |
+| the network, trained on 2x the positions, half of them random | −21 | no | post-fix; −21 [−104,+60] n=50 |
+| the network, fitted only inside the bound | −12 | no | post-fix; −12 [−89,+64] n=60 |
+| singular extensions at 150,000 nodes | +9 | no | post-fix; +9 [−53,+71] n=40 |
 
 Several of the rejected ones read strongly positive at thirty games: capture history showed
 +120 there and finished at −3. Thirty games is worth nothing at all.
